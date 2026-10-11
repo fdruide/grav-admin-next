@@ -74,7 +74,7 @@ export async function getPageTranslations(route: string): Promise<PageTranslatio
 
 export async function createTranslation(
 	route: string,
-	body: { lang: string; title?: string; content?: string; header?: Record<string, unknown> }
+	body: { source_lang?: string; lang: string; title?: string; content?: string; header?: Record<string, unknown> }
 ): Promise<PageDetail> {
 	const cleanRoute = route.startsWith('/') ? route.slice(1) : route;
 	return api.post<PageDetail>(`/pages/${cleanRoute}/translate`, body);

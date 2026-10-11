@@ -1637,7 +1637,9 @@
 				header = setByPath(header, dotPath, val);
 			}
 
+			const currentLang = contentLang.enabled ? contentLang.activeLang : undefined;
 			await createTranslation(route, {
+				source_lang: currentLang,
 				lang: targetLang,
 				title,
 				content,

@@ -1637,9 +1637,11 @@
 				header = setByPath(header, dotPath, val);
 			}
 
-			const currentLang = contentLang.enabled ? contentLang.activeLang : undefined;
+			// The language of the file the editor loaded, which is not the active
+			// content language when the page is shown as a fallback: the server
+			// has to read that file to keep the page's template.
 			await createTranslation(route, {
-				source_lang: currentLang,
+				source_lang: contentLang.enabled ? effectiveLang : undefined,
 				lang: targetLang,
 				title,
 				content,

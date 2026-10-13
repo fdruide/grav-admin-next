@@ -6,7 +6,7 @@
 	import { reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
 	import type { PageSummary, PageDetail } from '$lib/api/endpoints/pages';
-	import { buildMoveOps } from '$lib/utils/reorganize-ops';
+	import { buildMoveOps, fullInsertIndex, isWithin, landingIndex, orderNumber } from '$lib/utils/reorganize-ops';
 	import { invalidations } from '$lib/stores/invalidation.svelte';
 	import { onMount, tick, untrack } from 'svelte';
 	import { Badge } from '$lib/components/ui/badge';
@@ -91,19 +91,20 @@
 
 	const chunkSize = $derived(prefs.pagesChunkSize);
 
-	function streamConfigFor(parentRoute: string): StreamConfig {
+	/** `all`: the folder's every child, ignoring the filters (what a move numbers against). */
+	function streamConfigFor(parentRoute: string, all = false): StreamConfig {
 		return {
 			children_of: parentRoute,
-			sort: sortField,
-			order: sortOrder,
+			sort: all ? 'default' : sortField,
+			order: all ? 'asc' : sortOrder,
 			lang: lang || undefined,
 			translations: lang ? true : undefined,
-			...pageFilterStreamFields(filters),
+			...(all ? {} : pageFilterStreamFields(filters)),
 		};
 	}
 
-	function streamKeyFor(parentRoute: string): string {
-		return streamKey(streamConfigFor(parentRoute), chunkSize);
+	function streamKeyFor(parentRoute: string, all = false): string {
+		return streamKey(streamConfigFor(parentRoute, all), chunkSize);
 	}
 
 	async function bootstrapFolder(parentRoute: string): Promise<void> {
@@ -117,8 +118,8 @@
 		} catch { /* surfaced upstream */ }
 	}
 
-	function loadedPagesFor(parentRoute: string): PageSummary[] {
-		const key = streamKeyFor(parentRoute);
+	function loadedPagesFor(parentRoute: string, all = false): PageSummary[] {
+		const key = streamKeyFor(parentRoute, all);
 		const total = pagesChunks.getTotal(key);
 		if (total === null || total === 0) return [];
 		const out: PageSummary[] = [];
@@ -358,7 +359,8 @@
 	// --- Drag-and-drop handlers ---
 
 	function handleDragStart(e: DragEvent, page: PageSummary) {
-		if (!reorderMode) return;
+		// Search results are a flat list across folders: no position to drop into.
+		if (!reorderMode || searchActive) return;
 		dragPage = page;
 		dragParentRoute = getParentRoute(page);
 		if (e.dataTransfer) {
@@ -367,46 +369,69 @@
 		}
 	}
 
+	/** A page can't go inside itself or anywhere below it. */
+	function canDropInto(parentRoute: string): boolean {
+		return !!dragPage && !isWithin(parentRoute, pageApiRoute(dragPage));
+	}
+
 	function handleDragOver(e: DragEvent, parentRoute: string, index: number) {
 		if (!reorderMode || !dragPage) return;
+		if (!canDropInto(parentRoute)) {
+			dropTarget = null;
+			return;
+		}
 		e.preventDefault();
+		e.stopPropagation();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
 		dropTarget = { parentRoute, index };
 	}
 
 	async function handleDrop(e: DragEvent, targetParentRoute: string, targetIndex: number) {
 		e.preventDefault();
-		if (!dragPage || saving) return;
+		e.stopPropagation();
+		if (!dragPage || saving || !canDropInto(targetParentRoute)) {
+			resetDragState();
+			return;
+		}
 
 		const page = dragPage;
 		const pageRoute = pageApiRoute(page);
 		const sourceParentRoute = dragParentRoute!;
+		resetDragState();
 
-		// Reorganize must reflect the FULL sibling list of any folder it
-		// touches. Make sure both source and target are fully resident.
+		// Number against the folder's full child list, not just the rows a
+		// filter left on screen, so a move never reuses a hidden page's number.
 		await Promise.all([
-			pagesChunks.ensureAllChunks(streamKeyFor(sourceParentRoute), streamConfigFor(sourceParentRoute), chunkSize),
 			pagesChunks.ensureAllChunks(streamKeyFor(targetParentRoute), streamConfigFor(targetParentRoute), chunkSize),
+			pagesChunks.ensureAllChunks(streamKeyFor(targetParentRoute, true), streamConfigFor(targetParentRoute, true), chunkSize),
 		]);
+		const shown = loadedPagesFor(targetParentRoute).map(pageApiRoute);
+		const siblings = loadedPagesFor(targetParentRoute, true).map((p) => ({ route: pageApiRoute(p), order: p.order }));
+		const insertAt = fullInsertIndex(shown, siblings.map((p) => p.route), targetIndex);
 
 		const ops = buildMoveOps({
 			page: { route: pageRoute, order: page.order },
 			fromParent: sourceParentRoute,
 			toParent: targetParentRoute,
-			siblings: loadedPagesFor(targetParentRoute).map((p) => ({ route: pageApiRoute(p), order: p.order })),
-			insertAt: targetIndex,
+			siblings,
+			insertAt,
 		});
 		if (ops.length === 0) {
-			resetDragState();
+			// Dropped somewhere else in its own folder, but a page without a
+			// number sorts by name, so there is nothing to change.
+			const from = siblings.findIndex((p) => p.route === pageRoute);
+			if (orderNumber(page.order) === null && from !== -1 && landingIndex(siblings, pageRoute, insertAt) !== from) {
+				toast.info(i18n.t('ADMIN_NEXT.PAGES.MOVE_UNNUMBERED_KEEPS_NAME_ORDER', { title: page.title }));
+			}
 			return;
 		}
 
-		resetDragState();
 		saving = true;
 
 		try {
 			await reorganizePages(ops);
 			toast.success(i18n.t('ADMIN_NEXT.TOASTS.ITEM_MOVED', { name: page.title }));
+			followMove(pageRoute, targetParentRoute);
 			// pages:* invalidation drops the chunk store; the bootstrap
 			// effect re-fires for affected folders.
 		} catch (err: unknown) {
@@ -417,6 +442,21 @@
 		} finally {
 			saving = false;
 		}
+	}
+
+	/**
+	 * Keep the tree open where the page went: open folders inside the moved
+	 * page follow it to its new route, and the folder it landed in opens.
+	 */
+	function followMove(oldRoute: string, newParent: string) {
+		if (newParent === parentRouteOf(oldRoute)) return;
+		const newRoute = (newParent === '/' ? '' : newParent) + '/' + oldRoute.slice(oldRoute.lastIndexOf('/') + 1);
+		const next = new Set([
+			...Array.from(expandedRoutes, (r) => (isWithin(r, oldRoute) ? newRoute + r.slice(oldRoute.length) : r)),
+			newParent,
+		]);
+		expandedRoutes = next;
+		saveExpandedToStorage(next);
 	}
 
 	function handleDragEnd() {
@@ -570,11 +610,46 @@
 	{#snippet chunkPlaceholder(parentRoute: string, startIndex: number, count: number, depth: number)}
 		<div
 			class="flex items-center border-b border-border/40 text-[0.75rem] text-muted-foreground/60"
-			style="min-height: {count * ROW_HEIGHT_PX}px; padding-left: {16 + depth * 20}px;"
+			style="min-height: {count * ROW_HEIGHT_PX}px; padding-inline-start: {16 + depth * 20}px;"
 			use:observeChunkPlaceholder={{ startIndex, parentRoute }}
 		>
 			<Loader2 size={12} class="me-1.5 animate-spin" />
 			{i18n.t('ADMIN_NEXT.PAGES.LOADING_CHUNK', { from: startIndex + 1, to: startIndex + count })}
+		</div>
+	{/snippet}
+
+	<!-- Move mode: a thin strip at the start and end of every open folder's
+	     child list (and the top level). Hovering one draws the same line a row
+	     draws above itself, so a page can land first or last in any folder. -->
+	{#snippet dropLine(parentRoute: string, index: number, depth: number)}
+		<div
+			class="relative h-2"
+			aria-hidden="true"
+			ondragover={(e) => handleDragOver(e, parentRoute, index)}
+			ondrop={(e) => handleDrop(e, parentRoute, index)}
+		>
+			{#if isDropTarget(parentRoute, index)}
+				<div class="absolute inset-x-0 top-1/2 me-4 h-0.5 -translate-y-1/2 rounded bg-primary" style="margin-inline-start: {16 + depth * 20}px"></div>
+			{/if}
+		</div>
+	{/snippet}
+
+	<!-- Move mode: an open page with no children takes a drop as its first child. -->
+	{#snippet dropInside(page: PageSummary, apiRoute: string, depth: number)}
+		{@const active = isDropTarget(apiRoute, 0)}
+		{@const blocked = !!dragPage && !canDropInto(apiRoute)}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="border-b border-border/50 py-1.5 pe-4"
+			style="padding-inline-start: {16 + depth * 20}px"
+			ondragover={(e) => handleDragOver(e, apiRoute, 0)}
+			ondrop={(e) => handleDrop(e, apiRoute, 0)}
+		>
+			<div class="flex h-8 items-center rounded-md border border-dashed px-3 text-[0.75rem] transition-colors
+				{active ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground'}
+				{blocked ? 'opacity-50' : ''}">
+				<span class="truncate">{i18n.t('ADMIN_NEXT.PAGES.DROP_INSIDE', { title: page.title })}</span>
+			</div>
 		</div>
 	{/snippet}
 
@@ -596,21 +671,22 @@
 				|| translatedKeys.includes(lang)
 				|| (hasImplicitDefault && lang === contentLang.defaultLang)}
 			{@const isUntranslated = lang && hasAnyContent && !hasContentInLang}
-			{#if reorderMode && isDropTarget(parentRoute, index) && !isDragging(page)}
-				<div class="mx-4 h-0.5 rounded bg-primary transition-all" style="margin-left: {16 + depth * 20}px"></div>
+			<!-- The line above the first row belongs to the folder's start strip. -->
+			{#if reorderMode && index > 0 && isDropTarget(parentRoute, index) && !isDragging(page)}
+				<div class="me-4 h-0.5 rounded bg-primary transition-all" style="margin-inline-start: {16 + depth * 20}px"></div>
 			{/if}
 			<div
 				data-page-route={apiRoute}
 				class="group flex items-center gap-2 border-b border-border/50 px-2 py-2 transition-colors sm:px-4
 					{isDragging(page) ? 'opacity-30' : 'hover:bg-accent/50'}
 					{saving ? 'pointer-events-none' : ''}"
-				draggable={reorderMode}
+				draggable={reorderMode && !searchActive}
 				ondragstart={(e) => handleDragStart(e, page)}
 				ondragover={(e) => handleDragOver(e, parentRoute, index)}
 				ondrop={(e) => handleDrop(e, parentRoute, index)}
 				ondragend={handleDragEnd}
 			>
-				<div class="flex min-w-0 flex-1 items-center gap-1" style="padding-left: {depth * 20}px">
+				<div class="flex min-w-0 flex-1 items-center gap-1" style="padding-inline-start: {depth * 20}px">
 					{#if reorderMode}
 						<span class="flex shrink-0 cursor-grab items-center text-muted-foreground/40 hover:text-muted-foreground active:cursor-grabbing">
 							<GripVertical size={14} />
@@ -625,6 +701,22 @@
 							{#if expandedRoutes.has(apiRoute) && totalChildren(apiRoute) === null}
 								<Loader2 size={13} class="animate-spin" />
 							{:else if expandedRoutes.has(apiRoute)}
+								<ChevronDown size={14} />
+							{:else}
+								<DirectionalIcon name="chevron-forward" size={14} />
+							{/if}
+						</button>
+					{:else if reorderMode && !searchActive}
+						<!-- Move mode: any page can be opened to drop a first child into it. -->
+						<button
+							type="button"
+							class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/50 transition-colors hover:text-foreground"
+							onclick={() => toggleExpand(apiRoute)}
+							title={i18n.t('ADMIN_NEXT.PAGES.SHOW_DROP_INSIDE', { title: page.title })}
+							aria-label={i18n.t('ADMIN_NEXT.PAGES.SHOW_DROP_INSIDE', { title: page.title })}
+							aria-expanded={expandedRoutes.has(apiRoute)}
+						>
+							{#if expandedRoutes.has(apiRoute)}
 								<ChevronDown size={14} />
 							{:else}
 								<DirectionalIcon name="chevron-forward" size={14} />
@@ -722,19 +814,22 @@
 				{/if}
 			</div>
 
-			{#if !searchActive && page.has_children && expandedRoutes.has(apiRoute)}
-				{#each chunkBlocksFor(apiRoute) as block (block.page)}
-					{#if block.loaded}
-						{#each block.rows as child, childOffset (pageApiRoute(child))}
-							{@render treeRow(child, depth + 1, apiRoute, block.startIndex + childOffset)}
-						{/each}
-					{:else}
-						{@render chunkPlaceholder(apiRoute, block.startIndex, block.count, depth + 1)}
-					{/if}
-				{/each}
+			{#if !searchActive && (page.has_children || reorderMode) && expandedRoutes.has(apiRoute)}
 				{@const totalAtRoute = totalChildren(apiRoute)}
-				{#if reorderMode && totalAtRoute !== null && isDropTarget(apiRoute, totalAtRoute)}
-					<div class="mx-4 h-0.5 rounded bg-primary transition-all" style="margin-left: {16 + (depth + 1) * 20}px"></div>
+				{#if reorderMode && totalAtRoute === 0}
+					{@render dropInside(page, apiRoute, depth + 1)}
+				{:else}
+					{#if reorderMode && totalAtRoute}{@render dropLine(apiRoute, 0, depth + 1)}{/if}
+					{#each chunkBlocksFor(apiRoute) as block (block.page)}
+						{#if block.loaded}
+							{#each block.rows as child, childOffset (pageApiRoute(child))}
+								{@render treeRow(child, depth + 1, apiRoute, block.startIndex + childOffset)}
+							{/each}
+						{:else}
+							{@render chunkPlaceholder(apiRoute, block.startIndex, block.count, depth + 1)}
+						{/if}
+					{/each}
+					{#if reorderMode && totalAtRoute}{@render dropLine(apiRoute, totalAtRoute, depth + 1)}{/if}
 				{/if}
 			{/if}
 		{/if}
@@ -775,6 +870,7 @@
 	{:else}
 		{@const rootBlocks = chunkBlocksFor('/')}
 		{@const rootTotal = totalChildren('/')}
+		{#if reorderMode && rootTotal}{@render dropLine('/', 0, 0)}{/if}
 		{#each rootBlocks as block (block.page)}
 			{#if block.loaded}
 				<!-- Key on the structural route (raw_route), which is unique by construction.
@@ -788,9 +884,7 @@
 			{/if}
 		{/each}
 
-		{#if reorderMode && rootTotal !== null && rootTotal > 0 && isDropTarget('/', rootTotal)}
-			<div class="mx-4 h-0.5 rounded bg-primary"></div>
-		{/if}
+		{#if reorderMode && rootTotal}{@render dropLine('/', rootTotal, 0)}{/if}
 
 		{#if rootTotal === 0}
 			<div class="py-12 text-center text-sm text-muted-foreground">{i18n.t('ADMIN_NEXT.PAGES.NO_PAGES')}</div>

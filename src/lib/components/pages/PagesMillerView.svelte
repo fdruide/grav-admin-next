@@ -6,7 +6,7 @@
 	import { getPage, reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
 	import type { PageSummary, PageDetail } from '$lib/api/endpoints/pages';
-	import { buildMoveOps } from '$lib/utils/reorganize-ops';
+	import { buildMoveOps, fullInsertIndex, isWithin, landingIndex, orderNumber } from '$lib/utils/reorganize-ops';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { invalidations } from '$lib/stores/invalidation.svelte';
 	import { onMount, tick, untrack } from 'svelte';
@@ -64,7 +64,8 @@
 
 	// Drag state for Miller columns
 	let dragPage = $state<PageSummary | null>(null);
-	let dragColIndex = $state<number | null>(null);
+	// Api route of the folder the dragged page is in.
+	let dragParentRoute = $state<string | null>(null);
 	let dropTarget = $state<{ colIndex: number; index: number } | null>(null);
 	let saving = $state(false);
 
@@ -140,19 +141,20 @@
 	// chunks. Each new column uses the current dropdown value.
 	const chunkSize = $derived(prefs.pagesChunkSize);
 
-	function streamConfigFor(parentRoute: string): StreamConfig {
+	/** `all`: the folder's every child, ignoring the filters (what a move numbers against). */
+	function streamConfigFor(parentRoute: string, all = false): StreamConfig {
 		return {
 			children_of: parentRoute,
-			sort: sortField,
-			order: sortOrder,
+			sort: all ? 'default' : sortField,
+			order: all ? 'asc' : sortOrder,
 			lang: lang || undefined,
 			translations: lang ? true : undefined,
-			...pageFilterStreamFields(filters),
+			...(all ? {} : pageFilterStreamFields(filters)),
 		};
 	}
 
-	function streamKeyFor(parentRoute: string): string {
-		return streamKey(streamConfigFor(parentRoute), chunkSize);
+	function streamKeyFor(parentRoute: string, all = false): string {
+		return streamKey(streamConfigFor(parentRoute, all), chunkSize);
 	}
 
 	/**
@@ -183,8 +185,8 @@
 	 * sibling list — callers should first call ensureAllChunks to
 	 * guarantee completeness.
 	 */
-	function loadedPagesFor(parentRoute: string): PageSummary[] {
-		const key = streamKeyFor(parentRoute);
+	function loadedPagesFor(parentRoute: string, all = false): PageSummary[] {
+		const key = streamKeyFor(parentRoute, all);
 		const total = pagesChunks.getTotal(key);
 		if (total === null || total === 0) return [];
 		const out: PageSummary[] = [];
@@ -393,11 +395,15 @@
 		const apiRoute = pageApiRoute(page);
 		const wasSelected = columns[colIndex]?.selectedRoute === apiRoute;
 
+		// In Move mode every page opens a column, so a page with no children
+		// can take a drop as its first child.
+		const opensColumn = page.has_children || reorderMode;
+
 		// Without a preview pane, leaf pages have no useful "select" state —
 		// open edit directly. For folders, re-tapping the already-selected
 		// row also opens edit (the column is already drilled in below it).
 		if (!hasPreviewPane()) {
-			if (!page.has_children || wasSelected) {
+			if (!opensColumn || wasSelected) {
 				onEdit(apiRoute);
 				return;
 			}
@@ -407,7 +413,7 @@
 		const updated = columns.slice(0, colIndex + 1);
 		updated[colIndex] = { ...updated[colIndex], selectedRoute: apiRoute };
 
-		if (page.has_children) {
+		if (opensColumn) {
 			updated.push({ parentRoute: apiRoute, selectedRoute: null });
 			columns = updated;
 			// Kick off the chunk-store bootstrap for the new column. The
@@ -501,21 +507,14 @@
 
 	// --- Miller drag-and-drop handlers ---
 
-	function millerDragStart(e: DragEvent, page: PageSummary, colIndex: number) {
+	function millerDragStart(e: DragEvent, page: PageSummary) {
 		if (!reorderMode) return;
 		dragPage = page;
-		dragColIndex = colIndex;
+		dragParentRoute = parentRouteOf(pageApiRoute(page));
 		if (e.dataTransfer) {
 			e.dataTransfer.effectAllowed = 'move';
 			e.dataTransfer.setData('text/plain', page.route);
 		}
-	}
-
-	function millerDragOver(e: DragEvent, colIndex: number, index: number) {
-		if (!reorderMode || !dragPage) return;
-		e.preventDefault();
-		if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-		dropTarget = { colIndex, index };
 	}
 
 	/**
@@ -569,6 +568,11 @@
 	function updateIndicator(colEl: HTMLElement, index: number) {
 		const colRect = colEl.getBoundingClientRect();
 		const rows = Array.from(colEl.querySelectorAll<HTMLElement>('[data-miller-row]'));
+		// An empty column lights up its own drop box instead.
+		if (rows.length === 0) {
+			indicator = null;
+			return;
+		}
 		let top: number;
 		if (index < rows.length) {
 			top = rows[index].getBoundingClientRect().top;
@@ -583,10 +587,21 @@
 		indicator = { left: colRect.left + 8, top, width: colRect.width - 16 };
 	}
 
+	/** A page can't go inside itself or anywhere below it. */
+	function canDropInto(parentRoute: string | undefined): boolean {
+		return !!dragPage && parentRoute !== undefined && !isWithin(parentRoute, pageApiRoute(dragPage));
+	}
+
 	function setDropTargetFromEvent(e: DragEvent, colEl: HTMLElement) {
+		const colIndex = Number(colEl.getAttribute('data-miller-column'));
+		if (!canDropInto(columns[colIndex]?.parentRoute)) {
+			if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+			dropTarget = null;
+			indicator = null;
+			return;
+		}
 		e.preventDefault();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-		const colIndex = Number(colEl.getAttribute('data-miller-column'));
 		const index = computeIndexFromCursor(colEl, e.clientY);
 		dropTarget = { colIndex, index };
 		updateIndicator(colEl, index);
@@ -637,8 +652,11 @@
 	function millerColumnDrop(e: DragEvent, colIndex: number) {
 		if (!reorderMode || !dragPage) return;
 		e.preventDefault();
-		const index = dropTarget?.colIndex === colIndex ? dropTarget.index : 0;
-		millerDrop(e, colIndex, index);
+		if (dropTarget?.colIndex !== colIndex) {
+			millerDragEnd();
+			return;
+		}
+		millerDrop(e, colIndex, dropTarget.index);
 	}
 
 	$effect(() => {
@@ -651,70 +669,82 @@
 
 	async function millerDrop(e: DragEvent, colIndex: number, targetIndex: number) {
 		e.preventDefault();
-		if (!dragPage || saving || dragColIndex === null) return;
+		if (!dragPage || saving || dragParentRoute === null) return;
 
 		const page = dragPage;
-		const sourceColIndex = dragColIndex;
+		const fromParent = dragParentRoute;
 		const col = columns[colIndex];
-		const sourceCol = columns[sourceColIndex];
 
-		dragPage = null;
-		dragColIndex = null;
-		dropTarget = null;
-		indicator = null;
+		millerDragEnd();
+		if (!col || isWithin(col.parentRoute, pageApiRoute(page))) return;
 
-		// Reorganize must reflect the FULL sibling list. Ensure both columns
-		// are fully resident before sending positions — otherwise unloaded
-		// chunks would be excluded from the operation list and silently
-		// drop out of order.
+		// Number against the folder's full child list, not just the rows a
+		// filter or search left on screen, so a move never reuses a hidden
+		// page's number.
 		await Promise.all([
-			pagesChunks.ensureAllChunks(streamKeyFor(sourceCol.parentRoute), streamConfigFor(sourceCol.parentRoute), chunkSize),
 			pagesChunks.ensureAllChunks(streamKeyFor(col.parentRoute), streamConfigFor(col.parentRoute), chunkSize),
+			pagesChunks.ensureAllChunks(streamKeyFor(col.parentRoute, true), streamConfigFor(col.parentRoute, true), chunkSize),
 		]);
 
 		const pageRoute = pageApiRoute(page);
-		const siblings = loadedPagesFor(col.parentRoute).map((p) => ({ route: pageApiRoute(p), order: p.order }));
-		const crossColumn = sourceColIndex !== colIndex;
+		// targetIndex counts the rows the column shows, the page itself
+		// included when it is dragged within its own column.
+		const shown = filterColumn(loadedPagesFor(col.parentRoute)).map(pageApiRoute);
+		const siblings = loadedPagesFor(col.parentRoute, true).map((p) => ({ route: pageApiRoute(p), order: p.order }));
+		const insertAt = fullInsertIndex(shown, siblings.map((p) => p.route), targetIndex);
+		const crossColumn = fromParent !== col.parentRoute;
 
-		// targetIndex is the row the indicator sits above, counted in the
-		// unmodified column. In the page's own column, taking the page out
-		// first shifts every later row up by one, so a downward move lands
-		// one slot higher.
-		let insertAt = targetIndex;
-		if (!crossColumn) {
-			const currentIndex = siblings.findIndex((s) => s.route === pageRoute);
-			if (currentIndex === -1) return;
-			if (currentIndex < targetIndex) insertAt = targetIndex - 1;
-		}
-
-		// Number every page in the target column, so the result is exactly
-		// where the indicator showed even in a folder without numbers.
 		const ops = buildMoveOps({
 			page: { route: pageRoute, order: page.order },
-			fromParent: sourceCol.parentRoute,
+			fromParent,
 			toParent: col.parentRoute,
 			siblings,
 			insertAt,
-			numberAll: true,
 		});
-		if (ops.length === 0) return;
+		if (ops.length === 0) {
+			// Dropped somewhere else in its own column, but a page without a
+			// number sorts by name, so there is nothing to change.
+			const from = siblings.findIndex((p) => p.route === pageRoute);
+			if (orderNumber(page.order) === null && from !== -1 && landingIndex(siblings, pageRoute, insertAt) !== from) {
+				toast.info(i18n.t('ADMIN_NEXT.PAGES.MOVE_UNNUMBERED_KEEPS_NAME_ORDER', { title: page.title }));
+			}
+			return;
+		}
 
 		saving = true;
 		try {
 			await reorganizePages(ops);
 			toast.success(i18n.t(crossColumn ? 'ADMIN_NEXT.TOASTS.ITEM_MOVED' : 'ADMIN_NEXT.TOASTS.ITEM_REORDERED', { name: page.title }));
+			if (crossColumn) closeMovedColumns(pageRoute);
 			// The chunk store auto-invalidates on `pages:*`; the
 			// bootstrap effect re-fires.
-		} catch {
-			toast.error(i18n.t(crossColumn ? 'ADMIN_NEXT.PAGES.MOVE_FAILED' : 'ADMIN_NEXT.PAGES.REORDER_FAILED'));
+		} catch (err: unknown) {
+			const message = err && typeof err === 'object' && 'message' in err
+				? String((err as { message: string }).message)
+				: '';
+			toast.error(message || i18n.t(crossColumn ? 'ADMIN_NEXT.PAGES.MOVE_FAILED' : 'ADMIN_NEXT.PAGES.REORDER_FAILED'));
 		} finally {
 			saving = false;
 		}
 	}
 
+	/**
+	 * A page that moved to another folder takes its route, and the columns
+	 * opened inside it, with it: deselect it and close those columns.
+	 */
+	function closeMovedColumns(movedRoute: string) {
+		const at = columns.findIndex((c) => c.selectedRoute === movedRoute);
+		if (at === -1) return;
+		const next = columns.slice(0, at + 1);
+		next[at] = { ...next[at], selectedRoute: null };
+		columns = next;
+		previewPage = null;
+		saveSelectionPath();
+	}
+
 	function millerDragEnd() {
 		dragPage = null;
-		dragColIndex = null;
+		dragParentRoute = null;
 		dropTarget = null;
 		indicator = null;
 	}
@@ -725,6 +755,31 @@
 			if (columns[i].selectedRoute) return i;
 		}
 		return -1;
+	});
+
+	// Move mode opens a column for the selected page even when it has no
+	// children, so it can take a drop; leaving Move mode closes that column
+	// again if nothing was dropped into it.
+	let prevReorderMode = untrack(() => reorderMode);
+	$effect(() => {
+		const on = reorderMode;
+		if (on === prevReorderMode) return;
+		prevReorderMode = on;
+		untrack(() => {
+			const last = columns[columns.length - 1];
+			if (on) {
+				if (activeColumnIndex >= 0 && activeColumnIndex === columns.length - 1) {
+					const route = columns[activeColumnIndex].selectedRoute!;
+					columns = [...columns, { parentRoute: route, selectedRoute: null }];
+					bootstrapColumn(route);
+				}
+			} else if (columns.length > 1 && !last.selectedRoute) {
+				const owner = findInColumn(columns[columns.length - 2].parentRoute, last.parentRoute);
+				if (owner && !owner.has_children && pagesChunks.getTotal(streamKeyFor(last.parentRoute)) === 0) {
+					columns = columns.slice(0, -1);
+				}
+			}
+		});
 	});
 
 	// Reorder mode requires the full sibling list of every visible column —
@@ -912,6 +967,19 @@
 					<div class="flex flex-1 items-center justify-center">
 						<Loader2 size={16} class="animate-spin text-muted-foreground" />
 					</div>
+				{:else if colTotal === 0 && reorderMode && colIndex > 0}
+					<!-- Move mode: an empty folder takes a drop as its first child. -->
+					{@const owner = findInColumn(columns[colIndex - 1].parentRoute, col.parentRoute)}
+					{@const active = dropTarget?.colIndex === colIndex}
+					{@const blocked = !!dragPage && !canDropInto(col.parentRoute)}
+					<div class="p-2">
+						<div class="flex min-h-16 items-center justify-center rounded-md border border-dashed px-3 py-4 text-center text-xs transition-colors
+							{active ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground'}
+							{blocked ? 'opacity-50' : ''}">
+							{i18n.t('ADMIN_NEXT.PAGES.DROP_INSIDE', { title: owner?.title ?? col.parentRoute })}
+						</div>
+					</div>
+					<div class="min-h-16 flex-1"></div>
 				{:else if colTotal === 0}
 					<div class="flex flex-1 items-center justify-center px-3 text-center text-xs text-muted-foreground">
 						{isSearching ? i18n.t('ADMIN_NEXT.PAGES.NO_MATCH') : i18n.t('ADMIN_NEXT.PAGES.COLUMN_EMPTY')}
@@ -950,7 +1018,7 @@
 												? 'bg-accent text-accent-foreground'
 												: 'text-foreground hover:bg-accent'}"
 									draggable={reorderMode}
-									ondragstart={(e) => millerDragStart(e, page, colIndex)}
+									ondragstart={(e) => millerDragStart(e, page)}
 									ondragover={millerRowDragOver}
 									ondragend={millerDragEnd}
 								>

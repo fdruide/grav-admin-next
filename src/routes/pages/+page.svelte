@@ -30,6 +30,12 @@
 
 	let searchQuery = $state('');
 	let reorderMode = $state(false);
+	// Move mode lives in the Tree and Columns views only: the flat List view
+	// has no folders to drop a page into.
+	const canMove = $derived(prefs.pagesViewMode !== 'list');
+	$effect(() => {
+		if (!canMove) reorderMode = false;
+	});
 	let filters = $state<PageFilters>(emptyPageFilters());
 
 	// Template list for the filter dropdown. Non-modular page types are enough
@@ -267,7 +273,7 @@
 			{/if}
 
 			<!-- Reorder mode toggle -->
-			{#if canEditPages}
+			{#if canEditPages && canMove}
 			<button
 				class="inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[0.75rem] font-medium transition-colors
 					{reorderMode
@@ -324,7 +330,7 @@
 		{#if prefs.pagesViewMode === 'tree'}
 			<PagesTreeView {searchQuery} {filters} {reorderMode} lang={contentLang.enabled ? contentLang.activeLang : undefined} onEdit={handleEdit} onDelete={canEditPages ? handleDelete : undefined} onCopy={canEditPages ? handleCopy : undefined} onTogglePublished={canEditPages ? handleTogglePublished : undefined} {copyingRoutes} />
 		{:else if prefs.pagesViewMode === 'list'}
-			<PagesListView {searchQuery} {filters} {reorderMode} lang={contentLang.enabled ? contentLang.activeLang : undefined} onEdit={handleEdit} onDelete={canEditPages ? handleDelete : undefined} onCopy={canEditPages ? handleCopy : undefined} onTogglePublished={canEditPages ? handleTogglePublished : undefined} {copyingRoutes} />
+			<PagesListView {searchQuery} {filters} lang={contentLang.enabled ? contentLang.activeLang : undefined} onEdit={handleEdit} onDelete={canEditPages ? handleDelete : undefined} onCopy={canEditPages ? handleCopy : undefined} onTogglePublished={canEditPages ? handleTogglePublished : undefined} {copyingRoutes} />
 		{:else if prefs.pagesViewMode === 'miller'}
 			<PagesMillerView {searchQuery} {filters} {reorderMode} lang={contentLang.enabled ? contentLang.activeLang : undefined} onLanguageChange={() => loadStats()} onEdit={handleEdit} onDelete={canEditPages ? handleDelete : undefined} onCopy={canEditPages ? handleCopy : undefined} onTogglePublished={canEditPages ? handleTogglePublished : undefined} {copyingRoutes} />
 		{/if}

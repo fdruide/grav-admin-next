@@ -5,7 +5,8 @@
 	import { pageCan } from '$lib/utils/permissions';
 	import { reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
-	import type { PageSummary, PageDetail, ReorganizeOperation } from '$lib/api/endpoints/pages';
+	import type { PageSummary, PageDetail } from '$lib/api/endpoints/pages';
+	import { buildMoveOps } from '$lib/utils/reorganize-ops';
 	import { invalidations } from '$lib/stores/invalidation.svelte';
 	import { onMount, tick, untrack } from 'svelte';
 	import { Badge } from '$lib/components/ui/badge';
@@ -354,18 +355,6 @@
 		);
 	}
 
-	/** True if any sibling under this parent has a numeric order prefix.
-	 *  Used to decide whether the destination "expects" ordered children. */
-	function parentHasOrdering(parentRoute: string): boolean {
-		const siblings = loadedPagesFor(parentRoute);
-		return siblings.some(s => s.order !== null && s.order !== '');
-	}
-
-	/** True if this page itself currently carries a numeric order prefix. */
-	function pageIsOrdered(page: PageSummary): boolean {
-		return page.order !== null && page.order !== '';
-	}
-
 	// --- Drag-and-drop handlers ---
 
 	function handleDragStart(e: DragEvent, page: PageSummary) {
@@ -400,79 +389,16 @@
 			pagesChunks.ensureAllChunks(streamKeyFor(targetParentRoute), streamConfigFor(targetParentRoute), chunkSize),
 		]);
 
-		const siblings = loadedPagesFor(targetParentRoute);
-		const targetIsOrdered = parentHasOrdering(targetParentRoute);
-		const sourceIsOrdered = parentHasOrdering(sourceParentRoute);
-
-		// Build the reorder operations. We only emit position values for
-		// pages that already participate in ordering — assigning positions
-		// to unordered pages would force-rename them with NN. prefixes.
-		const ops: ReorganizeOperation[] = [];
-
-		if (sourceParentRoute === targetParentRoute) {
-			// Same-parent reorder
-			const currentIndex = siblings.findIndex(s => pageApiRoute(s) === pageRoute);
-			if (currentIndex === -1 || currentIndex === targetIndex) {
-				resetDragState();
-				return;
-			}
-
-			const reordered = [...siblings];
-			const [moved] = reordered.splice(currentIndex, 1);
-			reordered.splice(targetIndex, 0, moved);
-
-			reordered.forEach((p, i) => {
-				if (pageIsOrdered(p) || pageApiRoute(p) === pageRoute) {
-					ops.push({ route: pageApiRoute(p), position: i + 1 });
-				}
-			});
-		} else {
-			// Cross-parent move. The moved page gets a position only if the
-			// destination parent already uses ordering (or the page itself
-			// was ordered and we want to keep it ordered).
-			const movedOp: ReorganizeOperation = {
-				route: pageRoute,
-				parent: targetParentRoute,
-			};
-			if (targetIsOrdered || pageIsOrdered(page)) {
-				movedOp.position = targetIndex + 1;
-			}
-			ops.push(movedOp);
-
-			// Renumber source-parent siblings only if the source uses
-			// ordering — otherwise leave unordered pages alone. We must NOT
-			// renumber any sibling that is an ancestor of the destination
-			// parent: doing so renames its folder mid-batch, which
-			// invalidates every later op that targets a path under it
-			// (Phase 3 rename then fails with "No such file or directory").
-			if (sourceIsOrdered) {
-				const sourceSiblings = loadedPagesFor(sourceParentRoute)
-					.filter(s => {
-						const r = pageApiRoute(s);
-						if (r === pageRoute) return false;
-						if (r === targetParentRoute) return false;
-						if (targetParentRoute.startsWith(r + '/')) return false;
-						return true;
-					});
-				sourceSiblings.forEach((p, i) => {
-					if (pageIsOrdered(p)) {
-						ops.push({ route: pageApiRoute(p), position: i + 1 });
-					}
-				});
-			}
-
-			// Renumber target-parent siblings only if the destination uses
-			// ordering. Skip the moved page (already in ops above).
-			if (targetIsOrdered) {
-				const targetSiblings = [...siblings];
-				targetSiblings.splice(targetIndex, 0, page);
-				targetSiblings.forEach((p, i) => {
-					if (pageApiRoute(p) === pageRoute) return;
-					if (pageIsOrdered(p)) {
-						ops.push({ route: pageApiRoute(p), position: i + 1 });
-					}
-				});
-			}
+		const ops = buildMoveOps({
+			page: { route: pageRoute, order: page.order },
+			fromParent: sourceParentRoute,
+			toParent: targetParentRoute,
+			siblings: loadedPagesFor(targetParentRoute).map((p) => ({ route: pageApiRoute(p), order: p.order })),
+			insertAt: targetIndex,
+		});
+		if (ops.length === 0) {
+			resetDragState();
+			return;
 		}
 
 		resetDragState();

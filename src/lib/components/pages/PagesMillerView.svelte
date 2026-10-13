@@ -5,7 +5,8 @@
 	import { pageCan } from '$lib/utils/permissions';
 	import { getPage, reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
-	import type { PageSummary, PageDetail, ReorganizeOperation } from '$lib/api/endpoints/pages';
+	import type { PageSummary, PageDetail } from '$lib/api/endpoints/pages';
+	import { buildMoveOps } from '$lib/utils/reorganize-ops';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { invalidations } from '$lib/stores/invalidation.svelte';
 	import { onMount, tick, untrack } from 'svelte';
@@ -671,71 +672,41 @@
 			pagesChunks.ensureAllChunks(streamKeyFor(col.parentRoute), streamConfigFor(col.parentRoute), chunkSize),
 		]);
 
-		const targetPages = loadedPagesFor(col.parentRoute);
+		const pageRoute = pageApiRoute(page);
+		const siblings = loadedPagesFor(col.parentRoute).map((p) => ({ route: pageApiRoute(p), order: p.order }));
+		const crossColumn = sourceColIndex !== colIndex;
 
-		if (sourceColIndex !== colIndex) {
-			// Cross-column move: relocate to a new parent and renumber ALL
-			// target-parent siblings to honor the user's drop position.
-			//
-			// We renumber unconditionally (rather than only when the target
-			// is already ordered). If the target is unordered, sending the
-			// moved page with a position would land it wherever its slug
-			// alphabetizes — not where the indicator showed. Forcing every
-			// target sibling into the visually-implied position is the only
-			// way to make the drop WYSIWYG. The side effect is that target
-			// siblings without NN. prefixes get them; routes are unchanged.
-			const targetSiblings = [...targetPages];
-			targetSiblings.splice(targetIndex, 0, page);
-
-			const ops: ReorganizeOperation[] = targetSiblings.map((p, i) => {
-				const isMoved = p.route === page.route;
-				return isMoved
-					? { route: page.route, parent: col.parentRoute, position: i + 1 }
-					: { route: p.route, position: i + 1 };
-			});
-
-			saving = true;
-			try {
-				await reorganizePages(ops);
-				toast.success(i18n.t('ADMIN_NEXT.TOASTS.ITEM_MOVED', { name: page.title }));
-				// The chunk store auto-invalidates on `pages:*`; the
-				// bootstrap effect re-fires.
-			} catch {
-				toast.error(i18n.t('ADMIN_NEXT.PAGES.MOVE_FAILED'));
-			} finally {
-				saving = false;
-			}
-			return;
+		// targetIndex is the row the indicator sits above, counted in the
+		// unmodified column. In the page's own column, taking the page out
+		// first shifts every later row up by one, so a downward move lands
+		// one slot higher.
+		let insertAt = targetIndex;
+		if (!crossColumn) {
+			const currentIndex = siblings.findIndex((s) => s.route === pageRoute);
+			if (currentIndex === -1) return;
+			if (currentIndex < targetIndex) insertAt = targetIndex - 1;
 		}
 
-		// Same column reorder
-		const siblings = [...targetPages];
-		const currentIndex = siblings.findIndex(s => s.route === page.route);
-		// targetIndex is computed from cursor position against the ORIGINAL
-		// (unmodified) sibling list — it's the index of the row the user
-		// wants the dragged page to land BEFORE. After we splice the source
-		// out, every position to the right shifts left by one, so for a
-		// forward move (currentIndex < targetIndex) we re-insert at
-		// targetIndex - 1 to match the user's visual intent. Otherwise the
-		// dragged page ends up one slot below where the indicator showed.
-		if (currentIndex === -1) return;
-		const insertAt = currentIndex < targetIndex ? targetIndex - 1 : targetIndex;
-		if (currentIndex === insertAt) return;
-
-		const [moved] = siblings.splice(currentIndex, 1);
-		siblings.splice(insertAt, 0, moved);
-
-		const ops: ReorganizeOperation[] = siblings.map((p, i) => ({
-			route: p.route,
-			position: i + 1,
-		}));
+		// Number every page in the target column, so the result is exactly
+		// where the indicator showed even in a folder without numbers.
+		const ops = buildMoveOps({
+			page: { route: pageRoute, order: page.order },
+			fromParent: sourceCol.parentRoute,
+			toParent: col.parentRoute,
+			siblings,
+			insertAt,
+			numberAll: true,
+		});
+		if (ops.length === 0) return;
 
 		saving = true;
 		try {
 			await reorganizePages(ops);
-			toast.success(i18n.t('ADMIN_NEXT.TOASTS.ITEM_REORDERED', { name: page.title }));
+			toast.success(i18n.t(crossColumn ? 'ADMIN_NEXT.TOASTS.ITEM_MOVED' : 'ADMIN_NEXT.TOASTS.ITEM_REORDERED', { name: page.title }));
+			// The chunk store auto-invalidates on `pages:*`; the
+			// bootstrap effect re-fires.
 		} catch {
-			toast.error(i18n.t('ADMIN_NEXT.PAGES.REORDER_FAILED'));
+			toast.error(i18n.t(crossColumn ? 'ADMIN_NEXT.PAGES.MOVE_FAILED' : 'ADMIN_NEXT.PAGES.REORDER_FAILED'));
 		} finally {
 			saving = false;
 		}

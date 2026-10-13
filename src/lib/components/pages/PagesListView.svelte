@@ -3,10 +3,11 @@
 	import { base } from '$app/paths';
 	import { linkClick } from '$lib/utils/navLink';
 	import { pageCan } from '$lib/utils/permissions';
-	import { reorganizePages, pageApiRoute } from '$lib/api/endpoints/pages';
+	import { reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
 	import { invalidations } from '$lib/stores/invalidation.svelte';
-	import type { PageSummary, PageDetail, PageListParams, ReorganizeOperation } from '$lib/api/endpoints/pages';
+	import type { PageSummary, PageDetail, PageListParams } from '$lib/api/endpoints/pages';
+	import { buildMoveOps } from '$lib/utils/reorganize-ops';
 	import { onMount, tick, untrack } from 'svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import TranslationBadges from '$lib/components/ui/TranslationBadges.svelte';
@@ -221,13 +222,21 @@
 		search.run(searchQuery);
 	});
 	$effect(() => () => search.dispose());
-	// Keep search results current after an edit or on refocus; the browse
-	// list refreshes itself through the chunk store.
+	// Keep search results current after an edit or on refocus. The chunk
+	// store drops every stream on `pages:*`, and nothing else asks for the
+	// browse list again (the bootstrap effect only re-runs when the stream
+	// key changes), so reload its first chunk here or the list sits on
+	// "Loading pages..." after any edit.
 	onMount(() => {
 		const refresh = () => {
 			if (searchQuery.trim()) search.refresh();
 		};
-		const unsubPages = invalidations.subscribe('pages:*', refresh);
+		const onPages = () => {
+			refresh();
+			if (reorderMode) pagesChunks.ensureAllChunks(skey, streamConfig, chunkSize);
+			else pagesChunks.ensureChunkForIndex(skey, streamConfig, chunkSize, 0);
+		};
+		const unsubPages = invalidations.subscribe('pages:*', onPages);
 		const unsubFocus = invalidations.subscribe('*:focus', refresh);
 		return () => { unsubPages(); unsubFocus(); };
 	});
@@ -275,9 +284,7 @@
 	}
 
 	function getParentRoute(page: PageSummary): string {
-		const parts = page.route.split('/').filter(Boolean);
-		if (parts.length <= 1) return '/';
-		return '/' + parts.slice(0, -1).join('/');
+		return parentRouteOf(pageApiRoute(page));
 	}
 
 	function handleDragStart(e: DragEvent, page: PageSummary, index: number) {
@@ -320,19 +327,21 @@
 			return;
 		}
 
-		const siblings = all.filter(p => getParentRoute(p) === sourceParent);
-		const sourceIdx = siblings.findIndex(s => s.route === source.route);
-		const targetIdx = siblings.findIndex(s => s.route === target.route);
-		if (sourceIdx === -1 || targetIdx === -1 || sourceIdx === targetIdx) return;
+		const siblings = all
+			.filter(p => getParentRoute(p) === sourceParent)
+			.map(p => ({ route: pageApiRoute(p), order: p.order }));
+		const targetIdx = siblings.findIndex(s => s.route === pageApiRoute(target));
+		if (targetIdx === -1) return;
 
-		const reordered = [...siblings];
-		const [moved] = reordered.splice(sourceIdx, 1);
-		reordered.splice(targetIdx, 0, moved);
-
-		const ops: ReorganizeOperation[] = reordered.map((p, i) => ({
-			route: p.route,
-			position: i + 1,
-		}));
+		const ops = buildMoveOps({
+			page: { route: pageApiRoute(source), order: source.order },
+			fromParent: sourceParent,
+			toParent: sourceParent,
+			siblings,
+			insertAt: targetIdx,
+			numberAll: true,
+		});
+		if (ops.length === 0) return;
 
 		saving = true;
 		try {

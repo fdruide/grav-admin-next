@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 	import { i18n } from '$lib/stores/i18n.svelte';
@@ -151,10 +152,6 @@
 		return !!route && route.startsWith('/') && route !== '/unknown';
 	}
 
-	function pageHref(route: string): string {
-		return `${base}/pages/edit${route}`;
-	}
-
 	async function runScan() {
 		scanning = true;
 		try {
@@ -277,7 +274,7 @@
 					<FileWarning size={14} class="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
 					<div class="min-w-0">
 						{#if isLinkable(leak.route)}
-							<a href={pageHref(leak.route)} class="font-medium text-primary truncate hover:underline">{leak.route}</a>
+							<a href={pageEditUrl(leak.route)} class="font-medium text-primary truncate hover:underline">{leak.route}</a>
 						{:else}
 							<div class="font-medium text-primary truncate">{leak.route}</div>
 						{/if}
@@ -324,7 +321,7 @@
 									<code class="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-foreground">{event.token}</code>
 								{/if}
 								{#if isLinkable(event.route)}
-									<a href={pageHref(event.route)} class="text-xs text-primary truncate hover:underline">{event.route}</a>
+									<a href={pageEditUrl(event.route)} class="text-xs text-primary truncate hover:underline">{event.route}</a>
 								{:else}
 									<span class="text-xs text-muted-foreground truncate">{event.route}</span>
 								{/if}

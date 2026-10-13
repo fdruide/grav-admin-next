@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { base } from '$app/paths';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { getChildren, getPageNeighbors, pageApiRoute } from '$lib/api/endpoints/pages';
 	import type { PageNeighbors, PageSummary } from '$lib/api/endpoints/pages';
 	import { contentLang } from '$lib/stores/contentLang.svelte';
@@ -81,7 +81,7 @@
 	});
 
 	function navigate(target: string) {
-		goto(`${base}/pages/edit${target}`);
+		goto(pageEditUrl(target));
 	}
 
 	async function goDown() {

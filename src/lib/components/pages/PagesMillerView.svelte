@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { i18n } from '$lib/stores/i18n.svelte';
-	import { base } from '$app/paths';
 	import { isModifiedClick, linkClick } from '$lib/utils/navLink';
 	import { pageCan } from '$lib/utils/permissions';
 	import { getPage, reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
@@ -14,6 +13,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import TranslationBadges from '$lib/components/ui/TranslationBadges.svelte';
 	import PageStatusIndicator from '$lib/components/pages/PageStatusIndicator.svelte';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { pageStatus, pageStatusToggleLabel } from '$lib/utils/pageStatus';
 	import { contentLang } from '$lib/stores/contentLang.svelte';
 	import { pageHasLang } from '$lib/utils/page-fallback';
@@ -1029,7 +1029,7 @@
 									{/if}
 									<a
 										class="flex min-w-0 flex-1 items-center gap-2 text-start"
-										href="{base}/pages/edit{pageApiRoute(page)}"
+										href={pageEditUrl(pageApiRoute(page))}
 										onmousedown={(e) => { if (e.detail > 1 && !isModifiedClick(e)) e.preventDefault(); }}
 										onclick={linkClick(() => selectPage(colIndex, page))}
 										ondblclick={() => { window.getSelection()?.removeAllRanges(); onEdit(pageApiRoute(page)); }}

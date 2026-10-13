@@ -2,6 +2,7 @@
 	import { i18n } from '$lib/stores/i18n.svelte';
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { deletePage, duplicatePage, updatePage, pageApiRoute } from '$lib/api/endpoints/pages';
 	import type { PageSummary, PageDetail } from '$lib/api/endpoints/pages';
 	import { dashboardStats } from '$lib/stores/dashboardStats.svelte';
@@ -81,7 +82,7 @@
 	const FOCUS_KEY = 'grav_admin_pages_focus';
 	function handleEdit(route: string) {
 		try { sessionStorage.setItem(FOCUS_KEY, route); } catch { /* quota / disabled */ }
-		goto(`${base}/pages/edit${route}`);
+		goto(pageEditUrl(route));
 	}
 
 	function handleDelete(page: PageSummary) {

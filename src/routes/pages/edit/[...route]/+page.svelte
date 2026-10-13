@@ -39,6 +39,7 @@
 	import UnsavedChangesModal from '$lib/components/ui/UnsavedChangesModal.svelte';
 	import UnsavedIndicator from '$lib/components/ui/UnsavedIndicator.svelte';
 	import { createUnsavedGuard } from '$lib/utils/unsaved-guard.svelte';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { sanitizeSlugInput } from '$lib/utils/slug';
 	import Tabs from '$lib/components/ui/Tabs.svelte';
 	import StickyHeader from '$lib/components/ui/StickyHeader.svelte';
@@ -1089,7 +1090,7 @@
 				const home = roots.find((p) => p.route === '/' && p.raw_route);
 				if (home?.raw_route) {
 					const target = home.raw_route.startsWith('/') ? home.raw_route.slice(1) : home.raw_route;
-					goto(`${base}/pages/edit/${target}`, { replaceState: true });
+					goto(pageEditUrl(target), { replaceState: true });
 					return;
 				}
 			}
@@ -1497,7 +1498,7 @@
 					// pageData was just refreshed from the move response, and
 					// the API may be momentarily stale on the new path.
 					suppressLoadForRoute = moved.route;
-					goto(`${base}/pages/edit/${newEditRoute}`, { replaceState: true });
+					goto(pageEditUrl(newEditRoute), { replaceState: true });
 					saving = false;
 					return;
 				}
@@ -1558,7 +1559,7 @@
 					// pageData was just refreshed from the move response, and
 					// the API may be momentarily stale on the new path.
 					suppressLoadForRoute = moved.route;
-					goto(`${base}/pages/edit/${newEditRoute}`, { replaceState: true });
+					goto(pageEditUrl(newEditRoute), { replaceState: true });
 					saving = false;
 					return;
 				}
@@ -1746,7 +1747,7 @@
 		try {
 			const newPage = await duplicatePage(pageData, effectiveLang);
 			toast.success(i18n.t('ADMIN_NEXT.PAGES.EDIT.PAGE_COPIED'));
-			goto(`${base}/pages/edit${newPage.route}`);
+			goto(pageEditUrl(newPage.route));
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			toast.error(i18n.t('ADMIN_NEXT.TOASTS.COPY_FAILED', { detail: msg }));
@@ -1785,6 +1786,45 @@
 			}
 		}
 	}
+
+	// A `?lang=` in the URL names the language this link was shared in, so it
+	// wins over the language remembered in localStorage. Both effects below
+	// read only their own side (URL here, language there) so they cannot
+	// feed each other; they must also run before the load effect.
+	$effect(() => {
+		if (!contentLang.loaded) return;
+		const code = page.url.searchParams.get('lang');
+		untrack(() => {
+			if (!contentLang.enabled || !code || !contentLang.languages.some((l) => l.code === code)) return;
+			if (code !== contentLang.activeLang) contentLang.setLanguage(code);
+		});
+	});
+
+	// Keep the address bar pointing at the language on screen, so copying it
+	// gives a link that opens this page in this language. `route` is read so a
+	// move to another page without `?lang=` gets it added back.
+	$effect(() => {
+		if (!contentLang.loaded) return;
+		// page.url already points at the next page while we are being torn
+		// down; don't graft `?lang=` onto the page being navigated to.
+		if (page.route.id !== '/pages/edit/[...route]') return;
+		const active = contentLang.enabled ? contentLang.activeLang : '';
+		void route;
+		untrack(() => {
+			const current = page.url.searchParams.get('lang') ?? '';
+			if (current === active) return;
+			const url = new URL(page.url);
+			if (active) url.searchParams.set('lang', active);
+			else url.searchParams.delete('lang');
+			// Missing or unsupported `?lang=` is corrected in place; a real
+			// language change adds a history entry so Back returns to the
+			// previous language. The URL change is ours, not a navigation away,
+			// so it must not trip the unsaved-changes prompt.
+			const supported = contentLang.languages.some((l) => l.code === current);
+			guard.bypass();
+			goto(url, { replaceState: !supported, noScroll: true, keepFocus: true });
+		});
+	});
 
 	$effect(() => {
 		// Defer the first load until the content-language store has resolved.

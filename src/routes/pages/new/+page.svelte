@@ -5,6 +5,7 @@
 	import { slugify, sanitizeSlugInput } from '$lib/utils/slug';
 	import { page as pageStore } from '$app/state';
 	import { base } from '$app/paths';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { createPage } from '$lib/api/endpoints/pages';
 	import { getPageTypes, getPageBlueprint, emptyDateFieldKeys, publishedDefault, type PageType, type BlueprintSchema } from '$lib/api/endpoints/blueprints';
 	import { getChildren, getPage, pageApiRoute, type PageSummary } from '$lib/api/endpoints/pages';
@@ -437,7 +438,7 @@
 			if (kind === 'folder') {
 				goto(`${base}/pages`);
 			} else {
-				goto(`${base}/pages/edit${finalRoute}`);
+				goto(pageEditUrl(finalRoute));
 			}
 		} catch (err: unknown) {
 			const message = err && typeof err === 'object' && 'message' in err

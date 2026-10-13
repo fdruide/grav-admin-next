@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { i18n } from '$lib/stores/i18n.svelte';
 	import { base } from '$app/paths';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { Clock } from 'lucide-svelte';
 	import { getDashboardData } from '$lib/dashboard/context';
 	import { formatDate } from '$lib/dashboard/format';
@@ -22,7 +23,7 @@
 	{#if recentPages.length > 0}
 		<div class="space-y-0.5">
 			{#each recentPages.slice(0, max) as pg}
-				<a href="{base}/pages/edit{pg.route}" class="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-accent">
+				<a href={pageEditUrl(pg.route)} class="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-accent">
 					<div class="min-w-0 flex-1">
 						<div class="truncate text-[0.8125rem] font-medium text-foreground group-hover:text-primary">{pg.title}</div>
 						<div class="truncate text-[0.6875rem] text-muted-foreground">{pg.route}</div>

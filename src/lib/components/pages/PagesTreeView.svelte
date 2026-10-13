@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { i18n } from '$lib/stores/i18n.svelte';
-	import { base } from '$app/paths';
 	import { linkClick } from '$lib/utils/navLink';
+	import { pageEditUrl } from '$lib/utils/pageEditUrl';
 	import { pageCan } from '$lib/utils/permissions';
 	import { reorganizePages, pageApiRoute, parentRouteOf } from '$lib/api/endpoints/pages';
 	import { createPageSearch } from '$lib/utils/page-search.svelte';
@@ -738,7 +738,7 @@
 
 					<a
 						class="min-w-0 flex-1 text-start ps-1"
-						href="{base}/pages/edit{pageApiRoute(page)}"
+						href={pageEditUrl(pageApiRoute(page))}
 						onclick={linkClick(() => onEdit(pageApiRoute(page)))}
 						draggable={!reorderMode}
 					>

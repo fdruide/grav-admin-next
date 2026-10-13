@@ -231,8 +231,10 @@ export async function setSiteMediaOrder(path: string, order: string[]): Promise<
 export interface MediaMetaField {
 	key: string;
 	label: string;
-	type: 'text' | 'textarea' | 'tags';
-	/** String for text/textarea; array of strings for a tags field. */
+	type: 'text' | 'textarea' | 'tags' | 'select';
+	/** Select fields only: allowed stored value mapped to its display label. */
+	options?: Record<string, string>;
+	/** String for text/textarea/select; array of strings for a tags field. */
 	value: string | string[];
 }
 

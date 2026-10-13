@@ -2,8 +2,8 @@
 	import { i18n } from '$lib/stores/i18n.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { toast } from 'svelte-sonner';
-	import { X } from 'lucide-svelte';
-	import type { MediaMetaResponse, MediaMetaValues } from '$lib/api/endpoints/media';
+	import { ChevronsUpDown, X } from 'lucide-svelte';
+	import type { MediaMetaField, MediaMetaResponse, MediaMetaValues } from '$lib/api/endpoints/media';
 
 	interface Props {
 		/** Filename shown for context and used as the reload key. */
@@ -100,6 +100,17 @@
 	function tags(key: string): string[] {
 		const v = values[key];
 		return Array.isArray(v) ? v : [];
+	}
+
+	// A select's choices: the configured options, plus the stored value when it
+	// is no longer one of them so it is shown instead of silently blanked.
+	function selectOptions(field: MediaMetaField): [string, string][] {
+		const entries = Object.entries(field.options ?? {});
+		const current = values[field.key];
+		if (typeof current === 'string' && current !== '' && !entries.some(([v]) => v === current)) {
+			entries.push([current, current]);
+		}
+		return entries;
 	}
 
 	function addTag(key: string, raw: string) {
@@ -262,6 +273,24 @@
 									onblur={() => addTag(field.key, tagDrafts[field.key] ?? '')}
 								/>
 							{/if}
+						</div>
+					{:else if field.type === 'select'}
+						<div class="relative mt-1">
+							<select
+								id={`meta-${field.key}`}
+								class="flex w-full appearance-none rounded-md border border-input bg-transparent ps-2 pe-8 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-60"
+								disabled={readonly || saving}
+								value={typeof values[field.key] === 'string' ? (values[field.key] as string) : ''}
+								onchange={(e) => (values[field.key] = e.currentTarget.value)}
+							>
+								<option value=""></option>
+								{#each selectOptions(field) as [optValue, optLabel] (optValue)}
+									<option value={optValue}>{optLabel}</option>
+								{/each}
+							</select>
+							<div class="pointer-events-none absolute inset-y-0 end-0 flex items-center pe-2.5">
+								<ChevronsUpDown size={14} class="text-muted-foreground" />
+							</div>
 						</div>
 					{:else if field.type === 'textarea'}
 						<textarea
